@@ -57,7 +57,7 @@ impl InspectorPrimitive for Entity {
                     .id_salt(id)
                     .show(ui, |ui| {
                         let _queue = CommandQueue::default();
-                        crate::bevy_inspector::ui_for_entity_components(
+                        crate::bevy_inspector::ui_for_entity_components::<()>(
                             world,
                             queue.as_deref_mut(),
                             entity,

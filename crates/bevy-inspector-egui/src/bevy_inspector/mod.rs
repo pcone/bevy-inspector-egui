@@ -46,11 +46,13 @@ use bevy_ecs::{component::ComponentId, prelude::*};
 use bevy_hierarchy::{Children, Parent};
 use bevy_reflect::{Reflect, TypeRegistry};
 use bevy_state::state::{FreelyMutableState, NextState, State};
+use component_filter::ComponentFilter;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use pretty_type_name::pretty_type_name;
 
 pub(crate) mod errors;
+pub mod component_filter;
 
 /// UI for displaying the entity hierarchy
 pub mod hierarchy;
@@ -303,8 +305,16 @@ impl Filter {
     }
 }
 
+pub fn ui_for_world_entities_filtered<FE: WorldQuery + QueryFilter>(
+    world: &mut World,
+    ui: &mut egui::Ui,
+    with_children: bool,
+) {
+    ui_for_world_entities_filtered_components_filtered::<FE, ()>(world, ui, with_children);
+}
+
 /// Display all entities matching the given filter
-pub fn ui_for_world_entities_filtered<F: WorldQuery + QueryFilter>(
+pub fn ui_for_world_entities_filtered_components_filtered<FE: WorldQuery + QueryFilter, FC: ComponentFilter>(
     world: &mut World,
     ui: &mut egui::Ui,
     with_children: bool,
@@ -314,7 +324,7 @@ pub fn ui_for_world_entities_filtered<F: WorldQuery + QueryFilter>(
     let type_registry = world.resource::<AppTypeRegistry>().0.clone();
     let type_registry = type_registry.read();
 
-    let mut root_entities = world.query_filtered::<Entity, F>();
+    let mut root_entities = world.query_filtered::<Entity, FE>();
     let mut entities = root_entities.iter(world).collect::<Vec<_>>();
     filter.filter_entities(world, &mut entities);
     entities.sort();
@@ -329,7 +339,7 @@ pub fn ui_for_world_entities_filtered<F: WorldQuery + QueryFilter>(
             .id_salt(id)
             .show(ui, |ui| {
                 if with_children {
-                    ui_for_entity_with_children_inner(
+                    ui_for_entity_with_children_inner::<FC>(
                         world,
                         entity,
                         ui,
@@ -339,7 +349,7 @@ pub fn ui_for_world_entities_filtered<F: WorldQuery + QueryFilter>(
                     );
                 } else {
                     let mut queue = CommandQueue::default();
-                    ui_for_entity_components(
+                    ui_for_entity_components::<FC>(
                         &mut world.into(),
                         Some(&mut queue),
                         entity,
@@ -380,14 +390,14 @@ fn self_or_children_satisfy_filter(
 }
 
 /// Display the given entity with all its components and children
-pub fn ui_for_entity_with_children(world: &mut World, entity: Entity, ui: &mut egui::Ui) {
+pub fn ui_for_entity_with_children<FC: ComponentFilter>(world: &mut World, entity: Entity, ui: &mut egui::Ui) {
     let type_registry = world.resource::<AppTypeRegistry>().0.clone();
     let type_registry = type_registry.read();
 
     let entity_name = guess_entity_name(world, entity);
     ui.label(entity_name);
 
-    ui_for_entity_with_children_inner(
+    ui_for_entity_with_children_inner::<FC>(
         world,
         entity,
         ui,
@@ -397,7 +407,7 @@ pub fn ui_for_entity_with_children(world: &mut World, entity: Entity, ui: &mut e
     )
 }
 
-fn ui_for_entity_with_children_inner(
+fn ui_for_entity_with_children_inner<FC: ComponentFilter>(
     world: &mut World,
     entity: Entity,
     ui: &mut egui::Ui,
@@ -406,7 +416,7 @@ fn ui_for_entity_with_children_inner(
     filter: &Filter,
 ) {
     let mut queue = CommandQueue::default();
-    ui_for_entity_components(
+    ui_for_entity_components::<FC>(
         &mut world.into(),
         Some(&mut queue),
         entity,
@@ -431,7 +441,7 @@ fn ui_for_entity_with_children_inner(
                     .show(ui, |ui| {
                         ui.label(&child_entity_name);
 
-                        ui_for_entity_with_children_inner(
+                        ui_for_entity_with_children_inner::<FC>(
                             world,
                             child,
                             ui,
@@ -448,7 +458,7 @@ fn ui_for_entity_with_children_inner(
 }
 
 /// Display the components of the given entity
-pub fn ui_for_entity(world: &mut World, entity: Entity, ui: &mut egui::Ui) {
+pub fn ui_for_entity<FC: ComponentFilter>(world: &mut World, entity: Entity, ui: &mut egui::Ui) {
     let type_registry = world.resource::<AppTypeRegistry>().0.clone();
     let type_registry = type_registry.read();
 
@@ -456,7 +466,7 @@ pub fn ui_for_entity(world: &mut World, entity: Entity, ui: &mut egui::Ui) {
     ui.label(entity_name);
 
     let mut queue = CommandQueue::default();
-    ui_for_entity_components(
+    ui_for_entity_components::<FC>(
         &mut world.into(),
         Some(&mut queue),
         entity,
@@ -468,7 +478,7 @@ pub fn ui_for_entity(world: &mut World, entity: Entity, ui: &mut egui::Ui) {
 }
 
 /// Display the components of the given entity
-pub(crate) fn ui_for_entity_components(
+pub(crate) fn ui_for_entity_components<FC: ComponentFilter>(
     world: &mut RestrictedWorldView<'_>,
     mut queue: Option<&mut CommandQueue>,
     entity: Entity,
@@ -476,7 +486,7 @@ pub(crate) fn ui_for_entity_components(
     id: egui::Id,
     type_registry: &TypeRegistry,
 ) {
-    let Some(components) = components_of_entity(world, entity) else {
+    let Some(components) = components_of_entity::<FC>(world, entity) else {
         errors::entity_does_not_exist(ui, entity);
         return;
     };
@@ -559,7 +569,7 @@ fn set_highlight_style(ui: &mut egui::Ui) {
     };
 }
 
-fn components_of_entity(
+fn components_of_entity<FC: ComponentFilter>(
     world: &mut RestrictedWorldView<'_>,
     entity: Entity,
 ) -> Option<Vec<(String, ComponentId, Option<TypeId>, usize)>> {
@@ -574,13 +584,14 @@ fn components_of_entity(
 
             (name, component_id, info.type_id(), info.layout().size())
         })
+        .filter(|(_, _, type_id, _)| type_id.map_or(true, |type_id: std::any::TypeId| FC::matches_type_id(&type_id)))
         .collect();
     components.sort_by(|(name_a, ..), (name_b, ..)| name_a.cmp(name_b));
     Some(components)
 }
 
 /// Display the given entity with all its components and children
-pub fn ui_for_entities_shared_components(
+pub fn ui_for_entities_shared_components<FC: ComponentFilter>(
     world: &mut World,
     entities: &[Entity],
     ui: &mut egui::Ui,
@@ -592,7 +603,7 @@ pub fn ui_for_entities_shared_components(
         return;
     };
 
-    let Some(mut components) = components_of_entity(&mut world.into(), first) else {
+    let Some(mut components) = components_of_entity::<FC>(&mut world.into(), first) else {
         return errors::entity_does_not_exist(ui, first);
     };
 
